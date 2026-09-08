@@ -12,6 +12,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { bundleResultAtom, type SourceFile } from "@/store/bundler";
+import { initializePreviewWorkers } from "./initializeWorkers";
 
 interface PreviewFrameProps {
   files: SourceFile[];
@@ -23,7 +24,8 @@ function PreviewFrame(props: PreviewFrameProps) {
   const entry = getEntry(files);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
+    const { signal } = controller;
 
     async function disposeServiceWorker() {
       const registrations = await navigator.serviceWorker.getRegistrations();
@@ -37,43 +39,13 @@ function PreviewFrame(props: PreviewFrameProps) {
 
     async function registerServiceWorker() {
       await disposeServiceWorker();
-      if (cancelled) return;
+      if (signal.aborted) return;
 
       const registration = await navigator.serviceWorker.register("/preview/service-worker.js", {
         scope: "/preview/",
       });
 
-      function init(sw: ServiceWorker) {
-        if (cancelled) return;
-        sw.postMessage({
-          type: "init",
-          files,
-          scope: "/preview/",
-        });
-      }
-
-      function waitToInit(sw: ServiceWorker) {
-        return new Promise<void>((resolve, reject) => {
-          const handleStateChange = () => {
-            if (sw.state === "activated") {
-              sw.removeEventListener("statechange", handleStateChange);
-              init(sw);
-              resolve();
-            } else if (sw.state === "redundant") {
-              sw.removeEventListener("statechange", handleStateChange);
-              reject(new Error("The preview worker could not be activated."));
-            }
-          };
-          sw.addEventListener("statechange", handleStateChange);
-          handleStateChange();
-        });
-      }
-
-      const worker = registration.active ?? registration.installing ?? registration.waiting;
-      if (!worker) {
-        throw new Error("No preview worker is available.");
-      }
-      await waitToInit(worker);
+      await initializePreviewWorkers(registration, files, signal);
     }
 
     const iframe = iframeRef.current;
@@ -81,12 +53,12 @@ function PreviewFrame(props: PreviewFrameProps) {
       const iframeWindow = iframe.contentWindow;
       registerServiceWorker()
         .then(() => {
-          if (cancelled) return;
+          if (signal.aborted) return;
           const name = entry.filename.startsWith("/") ? entry.filename.slice(1) : entry.filename;
           iframeWindow.location = `/preview/${name}`;
         })
         .catch((error: unknown) => {
-          if (!cancelled) {
+          if (!signal.aborted) {
             toast.error("Unable to start preview", {
               description: error instanceof Error ? error.message : "Please try again.",
             });
@@ -95,7 +67,7 @@ function PreviewFrame(props: PreviewFrameProps) {
     }
 
     return () => {
-      cancelled = true;
+      controller.abort();
       disposeServiceWorker();
     };
   }, [files, entry]);
